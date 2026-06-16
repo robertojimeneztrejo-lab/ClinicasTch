@@ -223,9 +223,18 @@ def analyze_dossier(dossier_text: str, filters: dict) -> dict:
     """
     prompt = _build_prompt(dossier_text, filters)
 
+    # IMPORTANTE: gemini-2.5-flash tiene "thinking" activado por defecto, y
+    # esos tokens de razonamiento interno se restan del mismo presupuesto
+    # que max_output_tokens. Con thinking dinámico/ilimitado, el modelo puede
+    # consumir TODO el presupuesto pensando y dejar la respuesta JSON
+    # truncada (visto en producción: se cortó en mitad del primer campo).
+    # Acotamos el thinking a un presupuesto fijo y generoso para que la
+    # búsqueda con grounding siga siendo precisa, sin dejar la respuesta
+    # final sin espacio.
     config = types.GenerateContentConfig(
         temperature=0.2,
         max_output_tokens=65536,
+        thinking_config=types.ThinkingConfig(thinking_budget=8192),
         tools=[types.Tool(google_search=types.GoogleSearch())],
     )
 
@@ -238,6 +247,19 @@ def analyze_dossier(dossier_text: str, filters: dict) -> dict:
     finish_reason = None
     try:
         finish_reason = response.candidates[0].finish_reason.name
+    except Exception:
+        pass
+
+    # Diagnóstico de consumo de tokens (thinking vs respuesta visible),
+    # útil para depurar truncamientos por MAX_TOKENS.
+    usage_info = ""
+    try:
+        usage = response.usage_metadata
+        usage_info = (
+            f"thoughts_tokens={getattr(usage, 'thoughts_token_count', '?')} "
+            f"output_tokens={getattr(usage, 'candidates_token_count', '?')} "
+            f"total_tokens={getattr(usage, 'total_token_count', '?')}"
+        )
     except Exception:
         pass
 
@@ -263,7 +285,7 @@ def analyze_dossier(dossier_text: str, filters: dict) -> dict:
             )
             raise ValueError(
                 f"Gemini no devolvio JSON valido{truncated_msg}.\n"
-                f"finish_reason={finish_reason}\n"
+                f"finish_reason={finish_reason} | {usage_info}\n"
                 f"Primeros 300 caracteres: {raw[:300]}\n"
                 f"Ultimos 300 caracteres: {raw[-300:]}"
             )
