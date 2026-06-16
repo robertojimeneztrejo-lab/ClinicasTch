@@ -5,6 +5,12 @@ Llama a Gemini 2.5 Flash con el prompt estructurado y retorna JSON validado.
 Usa el SDK 'google-genai' (vigente), NO 'google-generativeai' (archivado por
 Google el 16-dic-2025). Activa Google Search grounding para evitar que el
 modelo alucine dominios web, contactos o directores por similitud de nombre.
+
+DISEÑO MULTI-FACULTAD: el tipo de institución y la modalidad de práctica YA
+NO se seleccionan de una lista fija en el sidebar. Gemini los infiere del
+dossier en la Fase 2 (cualquier facultad: medicina, derecho, psicología,
+ingeniería, etc.) y los asigna por organización en la Fase 3. El front-end
+solo filtra/agrupa después de recibir la respuesta — ver utils/filters.py.
 """
 
 import json
@@ -39,76 +45,109 @@ def _clean_json(text: str) -> str:
 
 
 def _build_prompt(dossier_text: str, filters: dict) -> str:
-    regions     = ", ".join(filters.get("regions", ["México"]))
-    location    = filters.get("location", "Ciudad de México")
-    radius_km   = filters.get("radius_km", 50)
-    modalities  = " | ".join(filters.get("modalities", []))
-    inst_types  = " | ".join(filters.get("inst_types", []))
-    max_results = filters.get("max_results", 15)
+    location    = filters.get("location", "")
+    pais        = filters.get("pais", "")
+    radius_km   = filters.get("radius_km", 3)
+    lat         = filters.get("lat")
+    lng         = filters.get("lng")
+    max_results = filters.get("max_results", 50)
     min_specs   = filters.get("min_specs", 1)
+
+    coords_line = (
+        f"- Coordenadas exactas del centro de búsqueda: {lat}, {lng}"
+        if lat is not None and lng is not None else
+        "- Coordenadas exactas: no disponibles, usa el nombre de la ubicación tal cual"
+    )
 
     return f"""
 Actúa como especialista en vinculación universitaria, desarrollo académico y análisis geoespacial.
+Tu tarea cubre estudiantes de CUALQUIER facultad o programa académico (medicina,
+derecho, psicología, ingeniería, trabajo social, administración, etc.), no solo
+ciencias de la salud. El tipo de institución y la modalidad de práctica deben
+inferirse del dossier, NO asumas que es un perfil clínico a menos que el
+dossier lo indique.
 
 CONTEXTO DE BÚSQUEDA:
-- Regiones objetivo: {regions}
-- Ubicación de referencia: {location} (radio: {radius_km} km)
-- Máximo de resultados: {max_results}
-- Tipos de institución aceptados: {inst_types}
-- Modalidades requeridas: {modalities}
-- Mínimo de especialidades: {min_specs}
+- Ubicación de referencia: {location}
+- País: {pais}
+{coords_line}
+- Radio de búsqueda: {radius_km} km — SOLO incluye organizaciones dentro de
+  este radio exacto desde el centro de búsqueda. Si no estás seguro de que
+  una organización esté dentro del radio, exclúyela (mejor un resultado
+  menos que uno fuera de rango).
+- Máximo de resultados: {max_results} (úsalo como techo, no como meta — si
+  hay menos organizaciones válidas en el radio, devuelve solo esas)
+- Mínimo de especialidades/áreas por organización: {min_specs}
 
 ---
 
 FASE 1 — PERFIL DE INSERCIÓN PROFESIONAL
-Analiza el siguiente dossier académico e identifica:
+Analiza el siguiente dossier académico e identifica a qué facultad o programa
+pertenece, y extrae:
 
 {dossier_text}
 
 Extrae en el JSON final:
+- facultad_o_programa (ej: "Medicina", "Derecho", "Psicología", "Ingeniería Civil")
 - competencias_profesionales (lista)
 - competencias_tecnicas (lista)
-- competencias_clinicas (lista)
+- competencias_especializadas (lista — equivalente a "clínicas" pero genérico
+  para cualquier facultad: procesales para Derecho, terapéuticas para
+  Psicología, de obra para Ingeniería, etc.)
 - procesos_a_ejecutar (lista)
 - sectores_economicos (lista)
 - infraestructura_requerida (lista)
 - entornos_laborales (lista)
 - resumen_perfil (máximo 300 palabras)
-- especialidades_clave (lista de especialidades médicas/clínicas centrales del perfil,
-  usadas para marcar compatibilidad en cada organización)
+- areas_clave (lista de áreas/especialidades centrales del perfil, usadas
+  para marcar compatibilidad en cada organización — equivalente genérico a
+  "especialidades_clave")
 
 ---
 
-FASE 2 — MODALIDADES APLICABLES
-Selecciona del siguiente listado SOLO las que aplican al programa del dossier:
+FASE 2 — TIPOS DE INSTITUCIÓN Y MODALIDADES (GENERADOS DINÁMICAMENTE)
+Con base en la facultad/programa identificado, define TÚ MISMO:
 
-CATEGORÍA A — Prácticas clínicas formales:
-prácticas_clínicas | campos_clínicos | rotaciones_clínicas | internado |
-servicio_social | estancias_clínicas | rotaciones_hospitalarias
+a) tipos_institucion_relevantes: lista de 5-12 tipos de organización
+   receptora adecuados para ESTE perfil específico. Ejemplos según facultad
+   (NO uses esta lista literal, es solo referencia de qué tan específico
+   debe ser):
+   - Medicina/Enfermería → hospital público, hospital universitario, centro
+     de salud, instituto nacional de salud
+   - Derecho → juzgado, fiscalía, notaría, despacho jurídico, defensoría
+     pública, comisión de derechos humanos
+   - Psicología → centro de salud mental, clínica psicológica, DIF, centro
+     de atención a víctimas, hospital psiquiátrico
+   - Ingeniería Civil → constructora, despacho de proyectos, dependencia de
+     obras públicas, empresa de infraestructura
+   - Trabajo Social → DIF, ONG de asistencia social, centro comunitario,
+     dependencia de desarrollo social
+   Usa snake_case para cada tipo (ej: "juzgado_civil", "despacho_juridico").
 
-CATEGORÍA B — Formación supervisada:
-pasantías | concurrencias | residencias_observacionales | observerships |
-formación_en_servicio | concurrente
-
-CATEGORÍA C — Acuerdos institucionales:
-convenios_docencia_servicio | prácticas_asistenciales | prácticum |
-prácticas_curriculares | estancias_formativas | convenio_universitario |
-escenarios_de_práctica
-
-CATEGORÍA D — Terminología internacional (EN):
-clinical_placement | clinical_training | observership | clinical_rotation
+b) modalidades_relevantes: lista de 5-15 términos de modalidad de práctica
+   adecuados para ESTE perfil, en español y/o inglés si aplica terminología
+   internacional. Ejemplos de referencia (adapta, no copies literal):
+   - Medicina → prácticas clínicas, internado, servicio social, rotaciones,
+     clinical placement, observership
+   - Derecho → práctica jurídica, servicio social legal, pasantía profesional,
+     prácticum jurídico
+   - Ingeniería → prácticas profesionales, residencia profesional, servicio
+     social, pasantía técnica
 
 ---
 
 FASE 3 — ORGANIZACIONES CANDIDATAS
-Busca hasta {max_results} organizaciones en las regiones indicadas compatibles con
-el perfil. Usa búsqueda real para fundamentar cada dato.
+Busca organizaciones reales dentro del radio de {radius_km} km desde la
+ubicación de referencia, compatibles con el perfil. Usa búsqueda real
+(Google Search) para fundamentar cada dato — NUNCA inventes ni infieras por
+similitud de nombre.
 
 Para cada organización devuelve EXACTAMENTE este JSON:
 {{
   "id": "secuencial",
   "nombre": "",
-  "tipo_institucion": "hospital_publico|hospital_privado|hospital_universitario|instituto_nacional|clinica_policlinico|atencion_primaria|salud_comunitaria|clinica_universitaria|imss_issste|sanatorio|investigacion_clinica",
+  "tipo_institucion": "snake_case definido en tipos_institucion_relevantes",
+  "tipo_institucion_label": "Nombre legible del tipo (ej: 'Juzgado Civil')",
   "especialidad_principal": "",
   "especialidades": [
     {{
@@ -122,6 +161,7 @@ Para cada organización devuelve EXACTAMENTE este JSON:
   "estado": "",
   "pais": "",
   "coordenadas": {{ "lat": null, "lng": null }},
+  "distancia_km_aproximada": 0,
   "contacto_telefono": "",
   "contacto_email": "",
   "sitio_web": "",
@@ -145,35 +185,38 @@ Para cada organización devuelve EXACTAMENTE este JSON:
   "fuente": ""
 }}
 
-IMPORTANTE — instrucciones de búsqueda de contacto (usa Google Search real,
-no recuerdes de memoria):
+IMPORTANTE — instrucciones de búsqueda y verificación (usa Google Search
+real, no recuerdes de memoria):
+- RADIO ESTRICTO: calcula o estima distancia_km_aproximada desde el centro
+  de búsqueda. Si la organización está claramente fuera de {radius_km} km,
+  NO la incluyas en el resultado.
+- tipo_institucion: usa ÚNICAMENTE uno de los valores que tú mismo definiste
+  en tipos_institucion_relevantes (Fase 2). Esto permite que el sistema
+  agrupe resultados consistentemente.
 - Para CADA organización, usa la herramienta de búsqueda para encontrar su
   sitio web OFICIAL real. Verifica el dominio exacto letra por letra —
-  NUNCA infieras o adivines un dominio por similitud de nombre. Por ejemplo,
-  un instituto llamado "X de la Ciudad de México" puede tener dominio
-  "xcdmx.gob.mx", NO necesariamente "x.gob.mx". Si tienes cualquier duda
-  sobre el dominio exacto, busca explícitamente "[nombre institución] sitio
-  oficial" y usa solo la URL que aparezca en los resultados de búsqueda reales.
-- sitio_web: debe ser la URL exacta encontrada en la búsqueda, copiada tal
-  cual aparece en los resultados. Si no la encuentras con certeza, usa null
-  en vez de adivinar — un campo null es preferible a un link roto.
+  NUNCA infieras o adivines un dominio por similitud de nombre. Si tienes
+  cualquier duda sobre el dominio exacto, busca explícitamente "[nombre
+  institución] sitio oficial" y usa solo la URL que aparezca en los
+  resultados de búsqueda reales.
+- sitio_web: debe ser la URL exacta encontrada en la búsqueda. Si no la
+  encuentras con certeza, usa null — un campo null es preferible a un link
+  roto.
 - contacto_email: busca en la página de "Contacto" del sitio oficial real
-  (ya verificado). Patrones comunes: "contacto@", "oficialia@",
-  "enseñanza@", "docencia@".
-- jefe_ensenanza.nombre: busca en "Quiénes somos" o "Directorio" del sitio
-  oficial real el cargo "Director", "Subdirector de Enseñanza", "Jefe de
-  Enseñanza e Investigación" o "Coordinador de Docencia". Si solo hay
-  Director General, úsalo con cargo "Director General".
+  ya verificado.
+- jefe_ensenanza.nombre: busca el responsable de vinculación, prácticas o
+  servicio social en "Quiénes somos" o "Directorio" del sitio oficial. Si
+  solo hay un Director General, úsalo con el cargo correspondiente.
 - horario_atencion: extrae el horario EXACTO como está escrito en la página
   de contacto del sitio oficial (ej: "Lunes a Viernes 09:00 a 17:00 hrs").
-  Esto es más confiable que el horario de Google Maps. Si no está publicado,
-  usa null.
+  Si no está publicado, usa null.
 - Solo devuelve null si después de buscar realmente el dato no está
-  publicado. Nunca inventes ni infieras contactos, dominios o horarios.
+  publicado. Nunca inventes ni infieras contactos, dominios, horarios o
+  distancias.
 - score_global = (compatibilidad_academica×0.35) + (capacidad_formativa×0.25)
   + (infraestructura×0.15) + (prestigio×0.10) + (investigacion×0.10)
   + (potencial_convenio×0.05)
-- Devuelve al menos {min_specs} especialidades por organización.
+- Devuelve al menos {min_specs} especialidades/áreas por organización.
 - Ordena el array por score_global descendente.
 
 ---
@@ -183,27 +226,26 @@ sin bloques markdown, sin explicaciones antes o después del JSON:
 
 {{
   "perfil": {{
+    "facultad_o_programa": "",
     "competencias_profesionales": [],
     "competencias_tecnicas": [],
-    "competencias_clinicas": [],
+    "competencias_especializadas": [],
     "procesos_a_ejecutar": [],
     "sectores_economicos": [],
     "infraestructura_requerida": [],
     "entornos_laborales": [],
     "resumen_perfil": "",
-    "especialidades_clave": []
+    "areas_clave": []
   }},
-  "modalidades": {{
-    "categoria_a": [],
-    "categoria_b": [],
-    "categoria_c": [],
-    "categoria_d": []
-  }},
+  "tipos_institucion_relevantes": [
+    {{ "valor": "snake_case", "label": "Nombre legible" }}
+  ],
+  "modalidades_relevantes": [],
   "organizaciones": [],
   "metadata": {{
     "total_encontradas": 0,
-    "regiones": [],
     "ubicacion_referencia": "",
+    "pais": "",
     "radio_km": 0
   }}
 }}
@@ -213,7 +255,7 @@ sin bloques markdown, sin explicaciones antes o después del JSON:
 def analyze_dossier(dossier_text: str, filters: dict) -> dict:
     """
     Llama a Gemini CON Google Search grounding (SDK google-genai vigente)
-    y retorna el dict con perfil + organizaciones.
+    y retorna el dict con perfil + tipos/modalidades dinámicos + organizaciones.
     Lanza ValueError si el JSON es inválido.
 
     NOTA: grounding (tools=GoogleSearch) y response_mime_type=json no son
@@ -225,12 +267,9 @@ def analyze_dossier(dossier_text: str, filters: dict) -> dict:
 
     # IMPORTANTE: gemini-2.5-flash tiene "thinking" activado por defecto, y
     # esos tokens de razonamiento interno se restan del mismo presupuesto
-    # que max_output_tokens. Con thinking dinámico/ilimitado, el modelo puede
-    # consumir TODO el presupuesto pensando y dejar la respuesta JSON
-    # truncada (visto en producción: se cortó en mitad del primer campo).
-    # Acotamos el thinking a un presupuesto fijo y generoso para que la
-    # búsqueda con grounding siga siendo precisa, sin dejar la respuesta
-    # final sin espacio.
+    # que max_output_tokens. Acotamos el thinking a un presupuesto fijo para
+    # que la búsqueda con grounding siga siendo precisa, sin dejar la
+    # respuesta final sin espacio (truncamiento visto en producción).
     config = types.GenerateContentConfig(
         temperature=0.2,
         max_output_tokens=65536,
@@ -250,8 +289,6 @@ def analyze_dossier(dossier_text: str, filters: dict) -> dict:
     except Exception:
         pass
 
-    # Diagnóstico de consumo de tokens (thinking vs respuesta visible),
-    # útil para depurar truncamientos por MAX_TOKENS.
     usage_info = ""
     try:
         usage = response.usage_metadata
