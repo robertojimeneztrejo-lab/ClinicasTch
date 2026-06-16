@@ -87,7 +87,7 @@ def render_ficha(org: dict, index: int, perfil_especialidades: list):
         # Meta + score
         col_info, col_score = st.columns([5, 1])
         with col_info:
-            tipo   = (org.get("tipo_institucion") or "").replace("_", " ").title()
+            tipo = org.get("tipo_institucion_label") or (org.get("tipo_institucion") or "").replace("_", " ").title()
             pais   = org.get("pais", "")
             ciudad = org.get("ciudad", "")
             st.caption(f"🏥 {tipo} · {pais}  ·  📍 {ciudad}")
