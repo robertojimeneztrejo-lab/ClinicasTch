@@ -179,21 +179,42 @@ def analyze_dossier(dossier_text: str, filters: dict) -> dict:
         prompt,
         generation_config=genai.GenerationConfig(
             temperature=0.2,
-            max_output_tokens=8192,
+            max_output_tokens=65536,
+            response_mime_type="application/json",
         ),
     )
 
-    raw  = response.text
+    finish_reason = None
+    try:
+        finish_reason = response.candidates[0].finish_reason.name
+    except Exception:
+        pass
+
+    raw   = response.text
     clean = _clean_json(raw)
 
     try:
         data = json.loads(clean)
     except json.JSONDecodeError:
-        # Intento de recuperación: buscar el primer { ... } válido
         match = re.search(r"\{.*\}", clean, re.DOTALL)
+        data = None
         if match:
-            data = json.loads(match.group())
-        else:
-            raise ValueError(f"Gemini no devolvió JSON válido:\n{raw[:500]}")
+            try:
+                data = json.loads(match.group())
+            except json.JSONDecodeError:
+                data = None
+
+        if data is None:
+            truncated_msg = (
+                " (la respuesta se cortó por límite de tokens — "
+                "reduce el numero de resultados maximos o sube el limite)"
+                if finish_reason == "MAX_TOKENS" else ""
+            )
+            raise ValueError(
+                f"Gemini no devolvio JSON valido{truncated_msg}.\n"
+                f"finish_reason={finish_reason}\n"
+                f"Primeros 300 caracteres: {raw[:300]}\n"
+                f"Ultimos 300 caracteres: {raw[-300:]}"
+            )
 
     return data
