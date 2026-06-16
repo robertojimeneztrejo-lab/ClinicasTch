@@ -179,10 +179,17 @@ def render_ficha(org: dict, index: int, perfil_especialidades: list):
                     unsafe_allow_html=True,
                 )
 
-                # Horario de atención
-                horario_detalle = places.get("horario_detalle") or []
-                if horario_detalle:
-                    with st.expander("🕐 Horario de atención"):
+                # Horario de atención — prioriza el dato extraído del sitio
+                # web oficial (Gemini) sobre el de Google Places, ya que suele
+                # ser más específico y confiable (ej. horario de oficialía)
+                horario_oficial  = org.get("horario_atencion")
+                horario_detalle  = places.get("horario_detalle") or []
+
+                if horario_oficial:
+                    with st.expander("🕐 Horario de atención (sitio oficial)"):
+                        st.caption(horario_oficial)
+                elif horario_detalle:
+                    with st.expander("🕐 Horario de atención (Google Maps)"):
                         for linea in horario_detalle:
                             st.caption(linea)
 
