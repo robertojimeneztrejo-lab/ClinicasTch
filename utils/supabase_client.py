@@ -105,6 +105,7 @@ def save_results(search_id: str, orgs: list[dict]):
             "maps_url":        o.get("places", {}).get("maps_url"),
             "foto_url":        o.get("places", {}).get("foto_url"),
             "horario_24h":     o.get("places", {}).get("horario_24h"),
+            "horario_atencion":o.get("horario_atencion"),
             "abierto_ahora":   o.get("places", {}).get("abierto_ahora"),
             "menciones_estud": o.get("places", {}).get("menciones_estudiantiles", []),
             "justificacion":   o.get("justificacion"),
