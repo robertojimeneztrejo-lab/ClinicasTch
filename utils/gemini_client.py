@@ -125,8 +125,22 @@ Para cada organización devuelve EXACTAMENTE este JSON:
   "fuente": ""
 }}
 
-IMPORTANTE:
-- Si no puedes verificar un dato, devuelve null. No inventes contactos.
+IMPORTANTE — instrucciones de búsqueda de contacto:
+- Para CADA organización, busca activamente en su sitio web oficial (sección
+  "Contacto", "Quiénes somos", "Directorio" o "Enseñanza e investigación")
+  antes de marcar un campo como null. La mayoría de hospitales públicos e
+  institutos nacionales publican email institucional, teléfono y el nombre
+  del director o jefe de enseñanza en su propia página web.
+- contacto_email: busca específicamente patrones como "contacto@",
+  "oficialia@", "enseñanza@", "docencia@", o el correo institucional
+  listado en la página de contacto del sitio oficial.
+- jefe_ensenanza.nombre: busca el cargo equivalente a "Director",
+  "Subdirector de Enseñanza", "Jefe de Enseñanza e Investigación",
+  "Coordinador de Docencia" en la sección de directorio o quiénes somos.
+  Si la página solo lista al Director General y no a un jefe de enseñanza
+  específico, usa el Director General con cargo: "Director General".
+- Solo devuelve null si después de buscar en el sitio oficial el dato
+  genuinamente no está publicado. No inventes contactos.
 - score_global = (compatibilidad_academica×0.35) + (capacidad_formativa×0.25)
   + (infraestructura×0.15) + (prestigio×0.10) + (investigacion×0.10)
   + (potencial_convenio×0.05)
