@@ -128,6 +128,7 @@ _EMPTY_PLACES = {
     "maps_url": None,
     "foto_url": None,
     "horario_24h": None,
+    "horario_detalle": [],
     "abierto_ahora": None,
     "business_status": None,
     "menciones_estudiantiles": [],
@@ -164,8 +165,9 @@ def enrich_organization(org: dict) -> dict:
         foto_url = _photo_url(photos[0]["name"], key) if photos else None
 
         # Horario
-        opening = place.get("currentOpeningHours", {}) or {}
-        is_24h  = _is_24h(opening)
+        opening    = place.get("currentOpeningHours", {}) or {}
+        is_24h     = _is_24h(opening)
+        horario_desc = opening.get("weekdayDescriptions", [])
 
         # Reseñas → análisis Gemini
         reviews   = place.get("reviews", [])
@@ -177,6 +179,7 @@ def enrich_organization(org: dict) -> dict:
             "maps_url":                place.get("googleMapsUri"),
             "foto_url":                foto_url,
             "horario_24h":             is_24h,
+            "horario_detalle":         horario_desc,
             "abierto_ahora":           opening.get("openNow"),
             "business_status":        place.get("businessStatus"),
             "menciones_estudiantiles": menciones,
