@@ -13,9 +13,22 @@ _MODEL = "gemini-2.5-flash"
 
 
 def _clean_json(text: str) -> str:
-    """Elimina bloques markdown ```json ... ``` si Gemini los incluye."""
-    text = re.sub(r"^```json\s*", "", text.strip())
+    """
+    Extrae el JSON de la respuesta de Gemini, incluso cuando viene rodeado
+    de texto explicativo o citas de búsqueda (común cuando grounding está
+    activo). Estrategia: quitar fences markdown, luego recortar al primer
+    '{' y al último '}' del texto.
+    """
+    text = text.strip()
+    text = re.sub(r"^```json\s*", "", text)
+    text = re.sub(r"^```\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
+
+    first = text.find("{")
+    last  = text.rfind("}")
+    if first != -1 and last != -1 and last > first:
+        text = text[first:last + 1]
+
     return text.strip()
 
 
@@ -112,6 +125,7 @@ Para cada organización devuelve EXACTAMENTE este JSON:
     "verificado": false,
     "fecha_verificacion": null
   }},
+  "horario_atencion": null,
   "scores": {{
     "compatibilidad_academica": 0,
     "capacidad_formativa": 0,
@@ -125,22 +139,31 @@ Para cada organización devuelve EXACTAMENTE este JSON:
   "fuente": ""
 }}
 
-IMPORTANTE — instrucciones de búsqueda de contacto:
-- Para CADA organización, busca activamente en su sitio web oficial (sección
-  "Contacto", "Quiénes somos", "Directorio" o "Enseñanza e investigación")
-  antes de marcar un campo como null. La mayoría de hospitales públicos e
-  institutos nacionales publican email institucional, teléfono y el nombre
-  del director o jefe de enseñanza en su propia página web.
-- contacto_email: busca específicamente patrones como "contacto@",
-  "oficialia@", "enseñanza@", "docencia@", o el correo institucional
-  listado en la página de contacto del sitio oficial.
-- jefe_ensenanza.nombre: busca el cargo equivalente a "Director",
-  "Subdirector de Enseñanza", "Jefe de Enseñanza e Investigación",
-  "Coordinador de Docencia" en la sección de directorio o quiénes somos.
-  Si la página solo lista al Director General y no a un jefe de enseñanza
-  específico, usa el Director General con cargo: "Director General".
-- Solo devuelve null si después de buscar en el sitio oficial el dato
-  genuinamente no está publicado. No inventes contactos.
+IMPORTANTE — instrucciones de búsqueda de contacto (usa Google Search real,
+no recuerdes de memoria):
+- Para CADA organización, usa la herramienta de búsqueda para encontrar su
+  sitio web OFICIAL real. Verifica el dominio exacto letra por letra —
+  NUNCA infieras o adivines un dominio por similitud de nombre. Por ejemplo,
+  un instituto llamado "X de la Ciudad de México" puede tener dominio
+  "xcdmx.gob.mx", NO necesariamente "x.gob.mx". Si tienes cualquier duda
+  sobre el dominio exacto, busca explícitamente "[nombre institución] sitio
+  oficial" y usa solo la URL que aparezca en los resultados de búsqueda reales.
+- sitio_web: debe ser la URL exacta encontrada en la búsqueda, copiada tal
+  cual aparece en los resultados. Si no la encuentras con certeza, usa null
+  en vez de adivinar — un campo null es preferible a un link roto.
+- contacto_email: busca en la página de "Contacto" del sitio oficial real
+  (ya verificado). Patrones comunes: "contacto@", "oficialia@",
+  "enseñanza@", "docencia@".
+- jefe_ensenanza.nombre: busca en "Quiénes somos" o "Directorio" del sitio
+  oficial real el cargo "Director", "Subdirector de Enseñanza", "Jefe de
+  Enseñanza e Investigación" o "Coordinador de Docencia". Si solo hay
+  Director General, úsalo con cargo "Director General".
+- horario_atencion: extrae el horario EXACTO como está escrito en la página
+  de contacto del sitio oficial (ej: "Lunes a Viernes 09:00 a 17:00 hrs").
+  Esto es más confiable que el horario de Google Maps. Si no está publicado,
+  usa null.
+- Solo devuelve null si después de buscar realmente el dato no está
+  publicado. Nunca inventes ni infieras contactos, dominios o horarios.
 - score_global = (compatibilidad_academica×0.35) + (capacidad_formativa×0.25)
   + (infraestructura×0.15) + (prestigio×0.10) + (investigacion×0.10)
   + (potencial_convenio×0.05)
@@ -183,8 +206,13 @@ sin bloques markdown:
 
 def analyze_dossier(dossier_text: str, filters: dict) -> dict:
     """
-    Llama a Gemini y retorna el dict con perfil + organizaciones.
-    Lanza ValueError si el JSON es inválido.
+    Llama a Gemini CON Google Search grounding y retorna el dict con
+    perfil + organizaciones. Lanza ValueError si el JSON es inválido.
+
+    NOTA: grounding (tools=google_search) y response_mime_type=json no son
+    compatibles simultáneamente en la API de Gemini, por eso forzamos el
+    formato JSON solo mediante instrucciones explícitas en el prompt y
+    parseo robusto, en vez de mediante response_mime_type.
     """
     prompt = _build_prompt(dossier_text, filters)
     model  = genai.GenerativeModel(_MODEL)
@@ -194,8 +222,8 @@ def analyze_dossier(dossier_text: str, filters: dict) -> dict:
         generation_config=genai.GenerationConfig(
             temperature=0.2,
             max_output_tokens=65536,
-            response_mime_type="application/json",
         ),
+        tools="google_search",
     )
 
     finish_reason = None
