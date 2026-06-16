@@ -1,6 +1,9 @@
 """
 app.py — Clinical Finder
-Buscador de campos clínicos con Gemini + Google Places + Supabase
+Buscador de campos de práctica con Gemini + Google Places + Supabase.
+Funciona para CUALQUIER facultad: medicina, derecho, psicología, ingeniería,
+trabajo social, etc. — el tipo de institución y la modalidad se infieren
+automáticamente del dossier, no se eligen de una lista fija.
 """
 
 import json
@@ -8,16 +11,17 @@ import streamlit as st
 import PyPDF2
 import io
 
-from utils.gemini_client  import analyze_dossier
-from utils.places_client  import enrich_all
-from utils.supabase_client import save_search, save_results, load_history, load_search_results
-from components.mapa      import render_map
-from components.ficha     import render_ficha
+from utils.gemini_client    import analyze_dossier
+from utils.places_client    import enrich_all
+from utils.geocoding        import geocode_location
+from utils.supabase_client  import save_search, save_results, load_history, load_search_results
+from components.mapa        import render_map
+from components.ficha       import render_ficha
 
 # ── Configuración de página ──────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Buscador de Campos Clínicos",
-    page_icon="🏥",
+    page_title="Buscador de Campos de Práctica",
+    page_icon="🎓",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -40,13 +44,13 @@ def extract_pdf_text(uploaded_file) -> str:
     return "\n".join(p.extract_text() or "" for p in reader.pages)
 
 
-def sort_orgs(orgs: list[dict], criterio: str) -> list[dict]:
+def sort_orgs(orgs: list, criterio: str) -> list:
     if criterio == "Puntaje global ↓":
         return sorted(orgs, key=lambda o: o.get("scores", {}).get("score_global", 0), reverse=True)
     if criterio == "Del más cercano al más lejano":
-        return sorted(orgs, key=lambda o: o.get("_distancia_km", 9999))
+        return sorted(orgs, key=lambda o: o.get("distancia_km_aproximada", 9999))
     if criterio == "Del más lejano al más cercano":
-        return sorted(orgs, key=lambda o: o.get("_distancia_km", 0), reverse=True)
+        return sorted(orgs, key=lambda o: o.get("distancia_km_aproximada", 0), reverse=True)
     if criterio == "Mayor número de especialidades":
         return sorted(orgs, key=lambda o: len(o.get("especialidades", [])), reverse=True)
     return orgs
@@ -57,19 +61,27 @@ def org_to_json_download(org: dict) -> str:
 
 
 # ── Estado de sesión ─────────────────────────────────────────────────────────
-if "results"       not in st.session_state: st.session_state.results       = []
-if "perfil"        not in st.session_state: st.session_state.perfil        = {}
-if "modalidades"   not in st.session_state: st.session_state.modalidades   = {}
-if "searching"     not in st.session_state: st.session_state.searching     = False
-if "dossier_text"  not in st.session_state: st.session_state.dossier_text  = ""
+defaults = {
+    "results":          [],
+    "perfil":           {},
+    "tipos_dinamicos":  [],
+    "modalidades_dinamicas": [],
+    "searching":        False,
+    "dossier_text":     "",
+    "last_radius_km":   3,
+    "last_location":    "",
+}
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 
 # ════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
 # ════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
-    st.markdown("## 🏥 Clinical Finder")
-    st.caption("Buscador de campos clínicos con IA")
+    st.markdown("## 🎓 Buscador de Campos de Práctica")
+    st.caption("Para cualquier facultad — la IA define tipo de institución y modalidad")
     st.divider()
 
     # ── Dossier ─────────────────────────────────────────────────────────────
@@ -87,84 +99,43 @@ with st.sidebar:
     if st.session_state.perfil.get("resumen_perfil"):
         with st.expander("👤 Perfil generado"):
             p = st.session_state.perfil
+            if p.get("facultad_o_programa"):
+                st.markdown(f"**Facultad/Programa:** {p['facultad_o_programa']}")
             st.caption(p.get("resumen_perfil", ""))
-            if p.get("especialidades_clave"):
-                st.markdown("**Especialidades clave:**")
-                st.write(", ".join(p["especialidades_clave"]))
+            if p.get("areas_clave"):
+                st.markdown("**Áreas clave:**")
+                st.write(", ".join(p["areas_clave"]))
 
     st.divider()
 
-    # ── Región ──────────────────────────────────────────────────────────────
-    st.markdown("**🌎 Región de búsqueda**")
-    regiones_opts = ["México", "España", "Argentina", "Colombia"]
-    regiones = st.multiselect(
-        "Regiones",
-        options=regiones_opts,
-        default=regiones_opts,
-        label_visibility="collapsed",
+    # ── Ubicación simplificada: referencia + país ──────────────────────────
+    st.markdown("**📍 Ubicación**")
+    location = st.text_input(
+        "Referencia (colonia, zona, dirección o ciudad)",
+        value=st.session_state.last_location or "Polanco",
+        help="Sé tan específico como puedas: una colonia o dirección da resultados "
+             "más precisos que solo el nombre de la ciudad.",
     )
+    pais = st.text_input("País", value="México")
 
-    st.markdown("**📍 Ubicación de referencia**")
-    col_loc, col_btn = st.columns([4, 1])
-    with col_loc:
-        location = st.text_input("Ciudad", value="Ciudad de México", label_visibility="collapsed")
-    with col_btn:
-        st.button("📡", help="Usar mi ubicación actual (próximamente)", disabled=True)
-
-    radius_km = st.slider("Radio de búsqueda (km)", 5, 200, 50, step=5)
-
-    st.divider()
-
-    # ── Tipo de institución ──────────────────────────────────────────────────
-    st.markdown("**🏛 Tipo de institución**")
-    INST_OPTS = {
-        "Hospital público / General":    "hospital_publico",
-        "Hospital privado":              "hospital_privado",
-        "Hospital universitario":        "hospital_universitario",
-        "Instituto nacional de salud":   "instituto_nacional",
-        "Clínica / Policlínico":         "clinica_policlinico",
-        "Centro de atención primaria":   "atencion_primaria",
-        "Centro de salud comunitario":   "salud_comunitaria",
-        "Clínica universitaria":         "clinica_universitaria",
-        "IMSS / ISSSTE / Seg. social":   "imss_issste",
-        "Sanatorio / Clínica especializada": "sanatorio",
-        "Centro de investigación clínica":   "investigacion_clinica",
-    }
-    inst_selected = []
-    for label, val in INST_OPTS.items():
-        default = val in ["hospital_publico", "hospital_privado", "hospital_universitario", "instituto_nacional"]
-        if st.checkbox(label, value=default, key=f"inst_{val}"):
-            inst_selected.append(val)
-
-    st.divider()
-
-    # ── Modalidades ──────────────────────────────────────────────────────────
-    st.markdown("**📋 Modalidad (ES / EN)**")
-    MODAL_OPTS = [
-        "Prácticas clínicas", "Campos clínicos", "Rotaciones clínicas",
-        "Internado", "Servicio social", "Pasantías", "Concurrencias",
-        "Escenarios de práctica", "Docencia-servicio", "Prácticum",
-        "Prácticas curriculares", "Convenio universitario",
-        "Clinical placement", "Clinical training", "Observership",
-    ]
-    EN_TERMS = {"Clinical placement", "Clinical training", "Observership"}
-    DEFAULT_MODAL = {"Prácticas clínicas", "Campos clínicos", "Rotaciones clínicas", "Internado", "Servicio social"}
-
-    modal_selected = []
-    for m in MODAL_OPTS:
-        label = f"🔵 {m}" if m in EN_TERMS else m
-        if st.checkbox(label, value=(m in DEFAULT_MODAL), key=f"modal_{m}"):
-            modal_selected.append(m)
+    radius_km = st.slider(
+        "Radio de búsqueda (km)",
+        min_value=1, max_value=5, value=3, step=1,
+        help="La distancia se calcula desde coordenadas exactas, geocodificadas "
+             "a partir de tu referencia + país.",
+    )
 
     st.divider()
 
     # ── Filtros numéricos ────────────────────────────────────────────────────
     st.markdown("**🔢 Filtros numéricos**")
-    min_specs   = st.slider("Mínimo de especialidades", 1, 30, 5)
+    min_specs   = st.slider("Mínimo de especialidades/áreas por institución", 1, 30, 3)
     max_results = st.select_slider(
-        "Cantidad de resultados",
-        options=[5, 10, 15, 20, 25, 30],
-        value=15,
+        "Tope máximo de resultados",
+        options=[10, 20, 30, 40, 50],
+        value=50,
+        help="No es una meta — la IA devuelve todas las instituciones válidas "
+             "encontradas en el radio, hasta este techo de seguridad.",
     )
 
     st.divider()
@@ -184,6 +155,37 @@ with st.sidebar:
 
     st.divider()
 
+    # ── Filtros sobre resultados ya obtenidos (post-búsqueda) ────────────────
+    # Aparecen solo si ya hay resultados, y se llenan con lo que Gemini generó
+    # dinámicamente — nunca con una lista fija predefinida.
+    if st.session_state.tipos_dinamicos or st.session_state.modalidades_dinamicas:
+        st.markdown("**🔧 Filtrar resultados actuales**")
+
+        if st.session_state.tipos_dinamicos:
+            tipo_labels = {t["valor"]: t["label"] for t in st.session_state.tipos_dinamicos}
+            tipos_filtro = st.multiselect(
+                "Tipo de institución (detectado por la IA)",
+                options=list(tipo_labels.keys()),
+                default=list(tipo_labels.keys()),
+                format_func=lambda v: tipo_labels.get(v, v),
+            )
+        else:
+            tipos_filtro = None
+
+        if st.session_state.modalidades_dinamicas:
+            modal_filtro = st.multiselect(
+                "Modalidad (detectada por la IA)",
+                options=st.session_state.modalidades_dinamicas,
+                default=st.session_state.modalidades_dinamicas,
+            )
+        else:
+            modal_filtro = None
+
+        st.divider()
+    else:
+        tipos_filtro = None
+        modal_filtro = None
+
     # ── Historial ────────────────────────────────────────────────────────────
     st.markdown("**🕑 Historial de búsquedas**")
     try:
@@ -191,8 +193,7 @@ with st.sidebar:
         if history:
             for h in history:
                 fecha  = h["created_at"][:10]
-                regs   = ", ".join(h.get("regions", []))
-                label  = f"{fecha} · {h.get('location','')} · {regs}"
+                label  = f"{fecha} · {h.get('location','')}"
                 if st.button(label, key=f"hist_{h['id']}", use_container_width=True):
                     with st.spinner("Cargando resultados guardados…"):
                         rows = load_search_results(h["id"])
@@ -208,28 +209,43 @@ with st.sidebar:
 # ════════════════════════════════════════════════════════════════════════════
 if st.session_state.searching:
     st.session_state.searching = False
+    st.session_state.last_location = location
+    st.session_state.last_radius_km = radius_km
+
+    # Paso 1: Geocodificar la referencia a coordenadas exactas
+    with st.spinner("📍 Localizando referencia geográfica…"):
+        geo = geocode_location(location, pais)
+
+    if not geo["encontrado"]:
+        st.warning(
+            f"No se pudo geocodificar '{location}, {pais}' "
+            f"({geo.get('error', 'motivo desconocido')}). "
+            f"La búsqueda continuará usando solo el texto de referencia, "
+            f"sin radio exacto calculado."
+        )
 
     filters = {
-        "regions":      regiones,
-        "location":     location,
-        "radius_km":    radius_km,
-        "modalities":   modal_selected,
-        "inst_types":   inst_selected,
-        "min_specs":    min_specs,
-        "max_results":  max_results,
+        "location":    geo.get("direccion_formateada") or location,
+        "pais":        pais,
+        "radius_km":   radius_km,
+        "lat":         geo.get("lat"),
+        "lng":         geo.get("lng"),
+        "min_specs":   min_specs,
+        "max_results": max_results,
     }
 
     with st.spinner("🤖 Gemini analizando el dossier y buscando organizaciones…"):
         try:
             data = analyze_dossier(st.session_state.dossier_text, filters)
-            st.session_state.perfil      = data.get("perfil", {})
-            st.session_state.modalidades = data.get("modalidades", {})
+            st.session_state.perfil = data.get("perfil", {})
+            st.session_state.tipos_dinamicos = data.get("tipos_institucion_relevantes", [])
+            st.session_state.modalidades_dinamicas = data.get("modalidades_relevantes", [])
             orgs = data.get("organizaciones", [])
         except Exception as e:
             st.error(f"Error en Gemini: {e}")
             st.stop()
 
-    with st.spinner("🗺 Enriqueciendo con Google Places API…"):
+    with st.spinner(f"🗺 Enriqueciendo {len(orgs)} organizaciones con Google Places API…"):
         orgs = enrich_all(orgs)
         st.session_state.results = orgs
 
@@ -249,23 +265,39 @@ if st.session_state.searching:
 orgs = st.session_state.results
 
 if not orgs:
-    st.markdown("## 🏥 Buscador de Campos Clínicos")
-    st.info("Sube un dossier académico en el panel izquierdo y haz clic en **Buscar organizaciones** para comenzar.")
+    st.markdown("## 🎓 Buscador de Campos de Práctica")
+    st.info(
+        "Sube un dossier académico en el panel izquierdo y haz clic en "
+        "**Buscar organizaciones** para comenzar. Funciona para cualquier "
+        "facultad — la IA detecta automáticamente qué tipo de institución "
+        "y modalidad de práctica corresponden a tu programa."
+    )
     st.stop()
+
+# ── Aplicar filtros dinámicos post-búsqueda (no vuelven a llamar a Gemini) ───
+orgs_filtrados = orgs
+if tipos_filtro is not None:
+    orgs_filtrados = [o for o in orgs_filtrados if o.get("tipo_institucion") in tipos_filtro]
+if modal_filtro is not None:
+    orgs_filtrados = [
+        o for o in orgs_filtrados
+        if any(m in (o.get("modalidades_aplicables") or []) for m in modal_filtro)
+    ]
 
 # ── Top bar ──────────────────────────────────────────────────────────────────
 col_title, col_s1, col_s2, col_s3 = st.columns([4, 1, 1, 1])
 with col_title:
-    st.markdown("## 🏥 Buscador de Campos Clínicos")
+    st.markdown("## 🎓 Buscador de Campos de Práctica")
 with col_s1:
-    st.metric("Resultados", len(orgs))
+    st.metric("Resultados", len(orgs_filtrados))
 with col_s2:
-    st.metric("Radio activo", f"{radius_km} km")
+    st.metric("Radio activo", f"{st.session_state.last_radius_km} km")
 with col_s3:
-    st.metric("Regiones", len(regiones))
+    n_tipos = len(set(o.get("tipo_institucion") for o in orgs_filtrados))
+    st.metric("Tipos de institución", n_tipos)
 
 # ── Mapa ─────────────────────────────────────────────────────────────────────
-render_map(orgs)
+render_map(orgs_filtrados)
 
 # ── Controles de resultados ──────────────────────────────────────────────────
 orden = st.selectbox(
@@ -274,17 +306,21 @@ orden = st.selectbox(
      "Del más lejano al más cercano", "Mayor número de especialidades"],
 )
 
-orgs_sorted = sort_orgs(orgs, orden)
-perfil_specs = st.session_state.perfil.get("especialidades_clave", [])
+orgs_sorted  = sort_orgs(orgs_filtrados, orden)
+perfil_areas = st.session_state.perfil.get("areas_clave", [])
 
-st.markdown(f"**Fichas de resultado** ({len(orgs_sorted)})")
+st.markdown(
+    f"**Fichas de resultado** ({len(orgs_sorted)} de {len(orgs)} totales "
+    f"— filtros aplicados en el sidebar)"
+    if len(orgs_sorted) != len(orgs) else
+    f"**Fichas de resultado** ({len(orgs_sorted)})"
+)
 st.divider()
 
 # ── Fichas ───────────────────────────────────────────────────────────────────
 for i, org in enumerate(orgs_sorted, start=1):
-    render_ficha(org, i, perfil_specs)
+    render_ficha(org, i, perfil_areas)
 
-    # Botón de descarga individual por ficha
     nombre = org.get("nombre", f"org_{i}")
     st.download_button(
         label="⬇ Descargar esta ficha (JSON)",
