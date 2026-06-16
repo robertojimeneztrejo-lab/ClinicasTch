@@ -10,10 +10,12 @@ import json
 import re
 import streamlit as st
 import requests
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 _BASE = "https://places.googleapis.com/v1"
 _MODEL_GEMINI = "gemini-2.5-flash"
+_gemini_client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
 
 def _get_key():
@@ -106,15 +108,17 @@ Si no hay menciones estudiantiles, devuelve: []
 """.strip()
 
     try:
-        model = genai.GenerativeModel(_MODEL_GEMINI)
-        response = model.generate_content(
-            prompt,
-            generation_config=genai.GenerationConfig(
-                temperature=0, max_output_tokens=512,
-                response_mime_type="application/json",
-            ),
+        config = types.GenerateContentConfig(
+            temperature=0,
+            max_output_tokens=512,
+            response_mime_type="application/json",
         )
-        raw = response.text.strip()
+        response = _gemini_client.models.generate_content(
+            model=_MODEL_GEMINI,
+            contents=prompt,
+            config=config,
+        )
+        raw = (response.text or "").strip()
         raw = re.sub(r"^```json\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
         return json.loads(raw)
