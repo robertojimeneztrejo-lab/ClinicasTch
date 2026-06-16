@@ -1,15 +1,21 @@
 """
 utils/gemini_client.py
 Llama a Gemini 2.5 Flash con el prompt estructurado y retorna JSON validado.
+
+Usa el SDK 'google-genai' (vigente), NO 'google-generativeai' (archivado por
+Google el 16-dic-2025). Activa Google Search grounding para evitar que el
+modelo alucine dominios web, contactos o directores por similitud de nombre.
 """
 
 import json
 import re
 import streamlit as st
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
-genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 _MODEL = "gemini-2.5-flash"
+
+_client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
 
 def _clean_json(text: str) -> str:
@@ -96,7 +102,7 @@ clinical_placement | clinical_training | observership | clinical_rotation
 
 FASE 3 — ORGANIZACIONES CANDIDATAS
 Busca hasta {max_results} organizaciones en las regiones indicadas compatibles con
-el perfil. Usa tu conocimiento actualizado y web search para fundamentar.
+el perfil. Usa búsqueda real para fundamentar cada dato.
 
 Para cada organización devuelve EXACTAMENTE este JSON:
 {{
@@ -173,7 +179,7 @@ no recuerdes de memoria):
 ---
 
 FORMATO FINAL — responde ÚNICAMENTE con este JSON válido, sin texto adicional,
-sin bloques markdown:
+sin bloques markdown, sin explicaciones antes o después del JSON:
 
 {{
   "perfil": {{
@@ -206,24 +212,27 @@ sin bloques markdown:
 
 def analyze_dossier(dossier_text: str, filters: dict) -> dict:
     """
-    Llama a Gemini CON Google Search grounding y retorna el dict con
-    perfil + organizaciones. Lanza ValueError si el JSON es inválido.
+    Llama a Gemini CON Google Search grounding (SDK google-genai vigente)
+    y retorna el dict con perfil + organizaciones.
+    Lanza ValueError si el JSON es inválido.
 
-    NOTA: grounding (tools=google_search) y response_mime_type=json no son
-    compatibles simultáneamente en la API de Gemini, por eso forzamos el
-    formato JSON solo mediante instrucciones explícitas en el prompt y
-    parseo robusto, en vez de mediante response_mime_type.
+    NOTA: grounding (tools=GoogleSearch) y response_mime_type=json no son
+    compatibles simultáneamente en la API de Gemini, por eso el formato
+    JSON se fuerza solo mediante instrucciones explícitas en el prompt y
+    un parseo robusto, no mediante response_mime_type.
     """
     prompt = _build_prompt(dossier_text, filters)
-    model  = genai.GenerativeModel(_MODEL)
 
-    response = model.generate_content(
-        prompt,
-        generation_config=genai.GenerationConfig(
-            temperature=0.2,
-            max_output_tokens=65536,
-        ),
-        tools="google_search",
+    config = types.GenerateContentConfig(
+        temperature=0.2,
+        max_output_tokens=65536,
+        tools=[types.Tool(google_search=types.GoogleSearch())],
+    )
+
+    response = _client.models.generate_content(
+        model=_MODEL,
+        contents=prompt,
+        config=config,
     )
 
     finish_reason = None
@@ -232,7 +241,7 @@ def analyze_dossier(dossier_text: str, filters: dict) -> dict:
     except Exception:
         pass
 
-    raw   = response.text
+    raw   = response.text or ""
     clean = _clean_json(raw)
 
     try:
