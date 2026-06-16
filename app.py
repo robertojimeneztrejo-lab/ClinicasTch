@@ -268,23 +268,11 @@ with col_s3:
 render_map(orgs)
 
 # ── Controles de resultados ──────────────────────────────────────────────────
-col_ord, col_dl = st.columns([3, 1])
-with col_ord:
-    orden = st.selectbox(
-        "Ordenar por",
-        ["Puntaje global ↓", "Del más cercano al más lejano",
-         "Del más lejano al más cercano", "Mayor número de especialidades"],
-        label_visibility="collapsed",
-    )
-with col_dl:
-    all_json = json.dumps(orgs, ensure_ascii=False, indent=2)
-    st.download_button(
-        "⬇ Descargar todo (JSON)",
-        data=all_json,
-        file_name="campos_clinicos.json",
-        mime="application/json",
-        use_container_width=True,
-    )
+orden = st.selectbox(
+    "Ordenar por",
+    ["Puntaje global ↓", "Del más cercano al más lejano",
+     "Del más lejano al más cercano", "Mayor número de especialidades"],
+)
 
 orgs_sorted = sort_orgs(orgs, orden)
 perfil_specs = st.session_state.perfil.get("especialidades_clave", [])
