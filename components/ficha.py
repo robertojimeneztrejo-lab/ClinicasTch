@@ -4,6 +4,7 @@ Renderiza una ficha de resultado completa usando st.container + HTML.
 """
 
 import streamlit as st
+from urllib.parse import quote
 
 
 def _stars_html(rating: float) -> str:
@@ -178,6 +179,13 @@ def render_ficha(org: dict, index: int, perfil_especialidades: list):
                     unsafe_allow_html=True,
                 )
 
+                # Horario de atención
+                horario_detalle = places.get("horario_detalle") or []
+                if horario_detalle:
+                    with st.expander("🕐 Horario de atención"):
+                        for linea in horario_detalle:
+                            st.caption(linea)
+
                 # Menciones estudiantiles
                 menciones = places.get("menciones_estudiantiles") or []
                 if menciones:
@@ -268,11 +276,17 @@ def render_ficha(org: dict, index: int, perfil_especialidades: list):
         # ── Botones pie ─────────────────────────────────────────────────────
         st.markdown("---")
         c1, c2 = st.columns(2)
-        maps_url_btn = places.get("maps_url") or (
-            f"https://www.google.com/maps/search/{org.get('nombre','')}+{org.get('ciudad','')}"
-        )
+
+        # Fallback de mapa con codificación de URL segura (evita 404 con
+        # paréntesis, acentos o espacios en el nombre de la organización)
+        nombre_q = quote(f"{org.get('nombre','')} {org.get('ciudad','')}")
+        maps_url_btn = places.get("maps_url") or f"https://www.google.com/maps/search/{nombre_q}"
+
         with c1:
             st.link_button("📍 Ver en mapa", maps_url_btn, use_container_width=True)
         with c2:
-            web_btn = org.get("sitio_web") or places.get("web_places") or maps_url_btn
-            st.link_button("🌐 Sitio web", web_btn, use_container_width=True)
+            web_btn = org.get("sitio_web") or places.get("web_places")
+            if web_btn:
+                st.link_button("🌐 Sitio web", web_btn, use_container_width=True)
+            else:
+                st.button("🌐 Sin sitio web verificado", use_container_width=True, disabled=True)
